@@ -7,6 +7,7 @@
 #include <time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -88,6 +89,25 @@ void send_raw(int sock, const char *raw_msg) {
     send(sock, raw_msg, strlen(raw_msg), 0);
 }
 
+// Helper: Recursive directory creation (like mkdir -p)
+void create_dir_if_not_exists(const char *path) {
+    char tmp[512];
+    char *p = NULL;
+    size_t len;
+
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    len = strlen(tmp);
+    if (tmp[len - 1] == '/') tmp[len - 1] = 0;
+    for (p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = 0;
+            mkdir(tmp, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, 0755);
+}
+
 // Helper: Cleanly remove client from all rooms on disconnect
 void remove_client_from_all_rooms(const char *username) {
     pthread_mutex_lock(&rooms_mutex);
@@ -144,7 +164,6 @@ void *handle_client(void *arg) {
                 strncpy(cli->username, uname, sizeof(cli->username) - 1);
                 cli->registered = 1;
 
-                // Notify all other clients that a user joined
                 char notify[128];
                 snprintf(notify, sizeof(notify), "MSG BCAST SERVER User %s joined\n", cli->username);
                 for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -162,7 +181,7 @@ void *handle_client(void *arg) {
                 log_event(log_buf);
             }
         }
-        // Verification: Must be registered to execute any subsequent command
+        // Verification: Must be registered first
         else if (!cli->registered) {
             send_response(cli->sockfd, "ERR 000", "NOT_REGISTERED");
         }
@@ -359,7 +378,109 @@ void *handle_client(void *arg) {
                 send_response(cli->sockfd, "OK", "SENT");
             }
         }
-        // 9. QUIT
+        // 9. SENDFILE <target> <filename> <filesize>
+        else if (strncmp(buffer, "SENDFILE ", 9) == 0) {
+            char target[32];
+            char filename[64];
+            long filesize = 0;
+
+            if (sscanf(buffer + 9, "%31s %63s %ld", target, filename, &filesize) < 3 || filesize <= 0) {
+                send_response(cli->sockfd, "ERR 006", "INVALID_FORMAT");
+                continue;
+            }
+
+            // Reject files exceeding 10MB
+            if (filesize > 10 * 1024 * 1024) {
+                send_response(cli->sockfd, "ERR 004", "FILE_TOO_LARGE");
+                continue;
+            }
+
+            int is_room = 0;
+            int target_client_fd = -1;
+
+            pthread_mutex_lock(&rooms_mutex);
+            for (int r = 0; r < room_count; r++) {
+                if (strcmp(rooms[r].name, target) == 0) {
+                    is_room = 1;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&rooms_mutex);
+
+            if (!is_room) {
+                pthread_mutex_lock(&clients_mutex);
+                for (int c = 0; c < MAX_CLIENTS; c++) {
+                    if (clients[c] && clients[c]->registered && strcmp(clients[c]->username, target) == 0) {
+                        target_client_fd = clients[c]->sockfd;
+                        break;
+                    }
+                }
+                pthread_mutex_unlock(&clients_mutex);
+
+                if (target_client_fd == -1) {
+                    send_response(cli->sockfd, "ERR 002", "USER_NOT_FOUND");
+                    continue;
+                }
+            }
+
+            // Create personalised server directory: ./storage/IT23847026/<sender>/
+            char user_storage_dir[256];
+            snprintf(user_storage_dir, sizeof(user_storage_dir), "%s/%s", STORAGE_BASE, cli->username);
+            create_dir_if_not_exists(user_storage_dir);
+
+            char full_file_path[512];
+            snprintf(full_file_path, sizeof(full_file_path), "%s/%s", user_storage_dir, filename);
+
+            FILE *dest_fp = fopen(full_file_path, "wb");
+            if (!dest_fp) {
+                send_response(cli->sockfd, "ERR 009", "CANNOT_SAVE_FILE");
+                continue;
+            }
+
+            char notify_header[256];
+            snprintf(notify_header, sizeof(notify_header), "FILE %s %s %ld\n", cli->username, filename, filesize);
+
+            if (!is_room && target_client_fd != -1) {
+                send(target_client_fd, notify_header, strlen(notify_header), 0);
+            }
+
+            // Exact byte counting for raw stream
+            long remaining = filesize;
+            char stream_buf[BUFFER_SIZE];
+            int transfer_error = 0;
+
+            while (remaining > 0) {
+                size_t chunk = ((size_t)remaining > sizeof(stream_buf)) ? sizeof(stream_buf) : (size_t)remaining;                
+                ssize_t n = recv(cli->sockfd, stream_buf, chunk, 0);
+                if (n <= 0) {
+                    transfer_error = 1;
+                    break;
+                }
+                fwrite(stream_buf, 1, n, dest_fp);
+
+                if (!is_room && target_client_fd != -1) {
+                    send(target_client_fd, stream_buf, n, 0);
+                }
+                remaining -= n;
+            }
+
+            fclose(dest_fp);
+
+            if (transfer_error) {
+                snprintf(log_buf, sizeof(log_buf), "File transfer aborted from %s", cli->username);
+                log_event(log_buf);
+                break;
+            }
+
+            char ok_body[128];
+            snprintf(ok_body, sizeof(ok_body), "FILE RECEIVED %s", filename);
+            send_response(cli->sockfd, "OK", ok_body);
+
+            snprintf(log_buf, sizeof(log_buf), "File transferred: %s from %s to %s (%ld bytes)",
+                     filename, cli->username, target, filesize);
+            log_event(log_buf);
+        }
+        // 10. QUIT
         else if (strcmp(buffer, "QUIT") == 0) {
             send_response(cli->sockfd, "OK", "BYE");
             break;
