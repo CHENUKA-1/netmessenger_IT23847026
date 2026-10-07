@@ -1,0 +1,14 @@
+[2026-10-07 01:37:29] Server started successfully.
+[2026-10-07 01:50:14] New connection from 127.0.0.1:33904
+[2026-10-07 01:50:46] User registered: alice
+[2026-10-07 01:51:24] Broadcast message from alice
+[2026-10-07 01:54:41] Client disconnected: alice
+[2026-10-07 02:23:19] Server started successfully.
+[2026-10-07 02:39:57] New connection from 127.0.0.1:52912
+[2026-10-07 02:40:13] User registered: bob
+[2026-10-07 02:41:23] New connection from 127.0.0.1:55134
+[2026-10-07 02:41:47] User registered: alice
+[2026-10-07 02:42:49] Private message from alice to bob
+[2026-10-07 02:43:59] File transferred: test_doc.txt from alice to bob (64 bytes)
+[2026-10-07 02:48:03] Client disconnected: alice
+[2026-10-07 03:29:33] Client disconnected: bob
